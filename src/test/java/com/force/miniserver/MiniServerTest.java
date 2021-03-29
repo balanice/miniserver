@@ -1,6 +1,7 @@
 package com.force.miniserver;
 
 import com.android.ddmlib.*;
+import com.android.sdklib.AndroidVersion;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -16,12 +17,14 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 
 public class MiniServerTest {
 
-    private  static final Logger logger = LoggerFactory.getLogger(MiniServerTest.class);
+    private static final Logger logger = LoggerFactory.getLogger(MiniServerTest.class);
 
     private static final int CACHE_SIZE = 1024 * 1024;
+
     @Test
     public void testDecode() {
         init();
@@ -127,6 +130,31 @@ public class MiniServerTest {
         return false;
     }
 
+    private int PORT_FIRST = 28963;
+    private int PORT_END = 28999;
+    private int localPort;
+
+    private void killMinicap(IDevice device) {
+        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
+        try {
+            device.executeShellCommand("ps -A|grep mini", receiver);
+            String output = receiver.getOutput();
+            if (output != null) {
+                String[] split = output.split("\\s+");
+                if (split.length > 1) {
+                    String cmd = String.format("kill -9 %s", split[1]);
+                    logger.info("kill minicap: {}", cmd);
+                    device.executeShellCommand(cmd, receiver);
+                    device.removeForward(1313, "minicap",
+                            IDevice.DeviceUnixSocketNamespace.ABSTRACT);
+                }
+            }
+        } catch (TimeoutException | AdbCommandRejectedException |
+                ShellCommandUnresponsiveException | IOException e) {
+            e.printStackTrace();
+        }
+    }
+
     private void init() {
         AndroidDebugBridge.init(false);
         AndroidDebugBridge bridge = AndroidDebugBridge.createBridge();
@@ -175,7 +203,7 @@ public class MiniServerTest {
         }
     }
 
-    private static void waitForDevice(AndroidDebugBridge bridge) {
+    private static boolean waitForDevice(AndroidDebugBridge bridge) {
         int count = 0;
         while (!bridge.hasInitialDeviceList()) {
             try {
@@ -185,9 +213,10 @@ public class MiniServerTest {
             }
             if (count > 300) {
                 System.err.print("Time out");
-                break;
+                return false;
             }
         }
+        return true;
     }
 
     public static int byteArrayToInt(byte[] b) {
@@ -218,5 +247,67 @@ public class MiniServerTest {
         }
         int i = byteArrayToInt(bytes);
         logger.info("{}", i);
+    }
+
+    private static final String MINICAP_BIN = "/data/local/tmp/minicap";
+    private static final String MINICAP_SO = "/data/local/tmp/minicap.so";
+
+    @Test
+    public void testVersion() {
+        AndroidDebugBridge.init(false);
+        AndroidDebugBridge bridge = AndroidDebugBridge.createBridge("/home/force/Android/Sdk/platform-tools/adb",
+                false, 10, TimeUnit.SECONDS);
+        if (!waitForDevice(bridge)) {
+            logger.error("No available device");
+            return;
+        }
+        IDevice device = bridge.getDevices()[0];
+        killMinicap(device);
+        if (!pushServer(device)) {
+            logger.error("push server failed");
+            return;
+        }
+        executeServer(device);
+    }
+
+    private boolean pushServer(IDevice device) {
+        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
+        AndroidVersion version = device.getVersion();
+        logger.info("level: {}", version.getApiLevel());
+        String abi = device.getProperty("ro.product.cpu.abi");
+        logger.info("abi: {}", abi);
+        String localMini = String.format("/home/force/Projects/minicap/libs/%s/minicap", abi);
+        String localSo = String.format("/home/force/Projects/minicap/jni/minicap-shared/aosp/libs/android-%d/%s/minicap.so", version.getApiLevel(), abi);
+        try {
+            device.pushFile(localMini, "/data/local/tmp/minicap");
+            device.pushFile(localSo, "/data/local/tmp/minicap.so");
+            device.executeShellCommand("chmod 777 " + MINICAP_BIN, receiver);
+            return true;
+        } catch (IOException | AdbCommandRejectedException | TimeoutException | SyncException | ShellCommandUnresponsiveException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    private boolean executeServer(IDevice device) {
+        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
+        // start minicap
+        String start = "LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x1920@1080x1920/0 -S >/dev/null 2>&1 &";
+        String check = "ps -ef|grep minicap";
+        logger.info("start minicap: {}", start);
+        try {
+            device.executeShellCommand(start, receiver);
+            for (int i = 0; i < 10; i++) {
+                device.executeShellCommand(check, receiver);
+                if (receiver.getOutput() != null && receiver.getOutput().contains("minicap")) {
+                    return true;
+                }
+                Thread.sleep(1000);
+            }
+        } catch (IOException | TimeoutException | AdbCommandRejectedException |
+                ShellCommandUnresponsiveException | InterruptedException e) {
+            e.printStackTrace();
+        }
+        return false;
     }
 }
