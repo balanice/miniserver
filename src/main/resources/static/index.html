@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>miniserver</title>
+    <script>
+        var ws;
+
+        function connect() {
+            var url = "ws://127.0.0.1:8080/screen";
+            ws = new WebSocket(url);
+            ws.onopen = function () {
+                console.debug('Info: WebSocket connection opened.');
+            };
+            ws.onmessage = function (event) {
+                console.debug('Received: ' + event.data);
+                var url = URL.createObjectURL(event.data);
+                document.getElementById("img_show").src = url;
+            };
+            ws.onclose = function () {
+                console.debug('Info: WebSocket connection closed.');
+            };
+        }
+
+        function disconnect() {
+            if (ws != null) {
+                ws.close();
+            }
+            document.getElementById("img_show").src = null;
+            console.debug("disconnect");
+        }
+    </script>
+</head>
+
+<body>
+<h1>MiniServer</h1>
+<button onclick="connect()">Connect</button>
+<button onclick="disconnect()">Disconnect</button>
+<br />
+<img id="img_show" width="540" height="960" />
+</body>
+
+</html>

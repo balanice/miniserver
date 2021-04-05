@@ -1,56 +1,102 @@
 package com.force.miniserver;
 
 import com.android.ddmlib.*;
+import com.android.sdklib.AndroidVersion;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
 import javax.websocket.Session;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
+import static com.force.miniserver.Utils.empty;
+
 @Service
 public class DeviceService {
 
     private static final Logger logger = LoggerFactory.getLogger(DeviceService.class);
 
+    private static final String ADB_HOME = "/home/force/Android/Sdk/platform-tools/adb";
+
     private AndroidDebugBridge bridge;
     private ScreenRunner runner;
+    private IDevice device;
 
     public DeviceService() {
         AndroidDebugBridge.init(false);
-        bridge = AndroidDebugBridge.createBridge("/home/force/Android/Sdk/platform-tools/adb",
+        bridge = AndroidDebugBridge.createBridge(ADB_HOME,
                 false, 10, TimeUnit.SECONDS);
         bridge.startAdb(10, TimeUnit.SECONDS);
         waitForDevice(bridge);
+        device = bridge.getDevices()[0];
     }
 
-    public void startScreen(Session session) {
+    public boolean startScreen(Session session) {
         logger.info("startScreen");
-        stopMinicap();
-        if (!startMinicap()) {
+        killMinicap();
+        if (!pushServer()) {
+            logger.info("push server failed");
+            return false;
+        }
+        if (!enableForward()) {
+            logger.info("create forward failed");
+            return false;
+        }
+        if (!executeServer()) {
             logger.error("start minicap failed, try again!");
-            try {
-                session.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return;
+            return false;
         }
         if (runner == null) {
             runner = new ScreenRunner();
         }
         runner.start(session);
         new Thread(runner).start();
+        return true;
+    }
+
+    public boolean pushServer() {
+        String userDir = System.getProperty("user.dir");
+
+        String bin_format = "minicap/%s/minicap";
+        String soFormat = "minicap/libs/android-%d/%s/minicap.so";
+
+        AndroidVersion version = device.getVersion();
+        String abi = device.getProperty("ro.product.cpu.abi");
+
+        String binResource = String.format(bin_format, abi);
+        logger.info(binResource);
+        String soResource = String.format(soFormat, version.getApiLevel(), abi);
+        logger.info(soResource);
+
+        String localBin = userDir + File.separator + "tmp" + File.separator + binResource;
+        String localSo = userDir + File.separator + "tmp" + File.separator + soResource;
+
+        if (!Utils.resourceToFile(binResource, localBin)) {
+            logger.error("bin resource to file failed");
+            return false;
+        }
+        if (!Utils.resourceToFile(soResource, localSo)) {
+            logger.error("so resource to file failed");
+            return false;
+        }
+
+        try {
+            device.pushFile(localBin, "/data/local/tmp/minicap");
+            device.pushFile(localSo, "/data/local/tmp/minicap.so");
+            executeShellCommand(device, "chmod +x /data/local/tmp/minicap");
+            return true;
+        } catch (IOException | AdbCommandRejectedException | TimeoutException | SyncException e) {
+            e.printStackTrace();
+        }
+        return false;
     }
 
     public void stopScreen() {
@@ -60,78 +106,84 @@ public class DeviceService {
         }
     }
 
-    private boolean stopMinicap() {
-        boolean b = bridge.hasInitialDeviceList();
-        if (b) {
-            IDevice device = bridge.getDevices()[0];
-            String serialNumber = device.getSerialNumber();
-            logger.info("sn: {}", serialNumber);
-            CollectingOutputReceiver receiver = new CollectingOutputReceiver();
-            try {
-                device.executeShellCommand("ps|grep mini", receiver);
-            } catch (TimeoutException | AdbCommandRejectedException |
-                    ShellCommandUnresponsiveException | IOException e) {
-                e.printStackTrace();
-            }
-            String output = receiver.getOutput();
-            if (output != null) {
-                String[] split = output.split("\\s+");
-                if (split.length > 1) {
-                    String cmd = String.format("kill -9 %s", split[1]);
-                    try {
-                        logger.info("kill minicap: {}", cmd);
-                        device.executeShellCommand(cmd, receiver);
-                        device.removeForward(1313, "minicap", IDevice.DeviceUnixSocketNamespace.ABSTRACT);
-                        Thread.sleep(3000);
-                        return true;
-                    } catch (TimeoutException | AdbCommandRejectedException | ShellCommandUnresponsiveException | IOException | InterruptedException e) {
-                        e.printStackTrace();
-                    }
+    private boolean enableForward() {
+        try {
+            device.createForward(1313, "minicap",
+                    IDevice.DeviceUnixSocketNamespace.ABSTRACT);
+            return true;
+        } catch (TimeoutException | AdbCommandRejectedException | IOException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    private boolean disableForward() {
+        try {
+            device.removeForward(1313, "minicap", IDevice.DeviceUnixSocketNamespace.ABSTRACT);
+            return true;
+        } catch (TimeoutException | AdbCommandRejectedException | IOException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    private void killMinicap() {
+        String pid = getPid();
+        if (!empty(pid)) {
+            String command = String.format("kill -9 %s", pid);
+            logger.info("kill: {}", command);
+            executeShellCommand(device, command);
+        }
+        disableForward();
+    }
+
+    private String getPid() {
+        String s = executeShellCommand(device, "ps -ef|grep minicap");
+        if (empty(s)) return null;
+        String[] split = s.split("\n");
+        for (String ss : split) {
+            if (ss.contains("minicap -P")) {
+                String[] split1 = ss.split("\\s+");
+                if (split1.length > 1) {
+                    return split1[1];
                 }
             }
         }
-        return false;
+        return null;
     }
 
-    private boolean startMinicap() {
-        boolean b = bridge.hasInitialDeviceList();
-        if (b) {
-            IDevice device = bridge.getDevices()[0];
-            String start = "LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x1920@1080x1920/0 -S >/dev/null 2>&1 &";
-            logger.info("start minicap: {}", start);
-            CollectingOutputReceiver receiver = new CollectingOutputReceiver();
-            try {
-                device.executeShellCommand(start, receiver);
-                device.createForward(1313, "minicap",
-                        IDevice.DeviceUnixSocketNamespace.ABSTRACT);
-                Thread.sleep(3000);
-                return checkServer(device);
-            } catch (TimeoutException | AdbCommandRejectedException |
-                    ShellCommandUnresponsiveException | IOException | InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
-        return false;
-    }
-
-    private boolean checkServer(IDevice device) {
+    public String executeShellCommand(IDevice device, String command) {
+        if (empty(command)) return null;
         CollectingOutputReceiver receiver = new CollectingOutputReceiver();
         try {
-            device.executeShellCommand("ps|grep minicap", receiver);
-        } catch (TimeoutException | AdbCommandRejectedException |
-                ShellCommandUnresponsiveException | IOException e) {
+            device.executeShellCommand(command, receiver);
+            return receiver.getOutput();
+        } catch (TimeoutException | AdbCommandRejectedException | ShellCommandUnresponsiveException | IOException e) {
             e.printStackTrace();
         }
-        String output = receiver.getOutput();
-        logger.info(output);
-        if (output != null) {
-            String[] split = output.split("\\s+");
-            if (split.length > 1) {
-                logger.info("pid: {}", split[1]);
-                return true;
-            }
+        return null;
+    }
+
+    private boolean executeServer() {
+        // start minicap
+        String start = String.format("%s -s %s shell LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x1920@1080x1920/0 -S >/dev/null 2>&1 &",
+                ADB_HOME, device.getSerialNumber());
+        executeAdbCommand(start);
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
-        return false;
+        return true;
+    }
+
+    private void executeAdbCommand(String command) {
+        logger.info(command);
+        try {
+            Runtime.getRuntime().exec(command);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private static void waitForDevice(AndroidDebugBridge bridge) {
@@ -170,7 +222,6 @@ public class DeviceService {
             InetSocketAddress address = new InetSocketAddress("127.0.0.1", 1313);
             byte[] cache = new byte[CACHE_SIZE];
             boolean readHead = false;
-            int count = 0;
             int index = 0;
             int imageSize = 0;
             try {
@@ -202,17 +253,15 @@ public class DeviceService {
                                 continue;
                             }
                             offset += 4;
-                            logger.info("imageSize: {}, index: {}, offset: {}", imageSize, index, offset);
                             byte[] bytes = Arrays.copyOfRange(cache, offset, offset + imageSize);
                             ByteBuffer buffer = ByteBuffer.wrap(bytes);
-//                            ByteBuffer buffer = ByteBuffer.wrap(cache, offset, imageSize);
                             session.getBasicRemote().sendBinary(buffer);
 
-//                            ByteArrayInputStream stream = new ByteArrayInputStream(cache, offset, imageSize);
-                            ByteArrayInputStream stream = new ByteArrayInputStream(bytes);
-                            BufferedImage i = ImageIO.read(stream);
-                            String filename = String.format("%s%s%d.jpg", "/home/force/Projects/temp", File.separator, count++);
-                            ImageIO.write(i, "JPG", new File(filename));
+                            // Save image to file.
+//                            ByteArrayInputStream stream = new ByteArrayInputStream(bytes);
+//                            BufferedImage i = ImageIO.read(stream);
+//                            String filename = String.format("%s%s%d.jpg", "/home/force/Projects/temp", File.separator, count++);
+//                            ImageIO.write(i, "JPG", new File(filename));
                             offset += imageSize;
                             imageSize = 0;
                             flag = true;

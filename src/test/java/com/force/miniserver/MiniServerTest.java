@@ -6,18 +6,18 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.ClassPathResource;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
+
+import static com.force.miniserver.Utils.empty;
 
 public class MiniServerTest {
 
@@ -25,7 +25,7 @@ public class MiniServerTest {
 
     private static final int CACHE_SIZE = 1024 * 1024;
 
-    @Test
+//    @Test
     public void testDecode() {
         init();
         Socket socket = new Socket();
@@ -95,7 +95,7 @@ public class MiniServerTest {
         Assertions.assertTrue(count >= 50);
     }
 
-    @Test
+//    @Test
     public void testCopy() {
         byte[] bytes1 = intToByteArray(1920);
         for (byte b : bytes1) {
@@ -135,25 +135,42 @@ public class MiniServerTest {
     private int localPort;
 
     private void killMinicap(IDevice device) {
-        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
-        try {
-            device.executeShellCommand("ps -A|grep mini", receiver);
-            String output = receiver.getOutput();
-            if (output != null) {
-                String[] split = output.split("\\s+");
-                if (split.length > 1) {
-                    String cmd = String.format("kill -9 %s", split[1]);
-                    logger.info("kill minicap: {}", cmd);
-                    device.executeShellCommand(cmd, receiver);
-                    device.removeForward(1313, "minicap",
-                            IDevice.DeviceUnixSocketNamespace.ABSTRACT);
-                }
-            }
-        } catch (TimeoutException | AdbCommandRejectedException |
-                ShellCommandUnresponsiveException | IOException e) {
-            e.printStackTrace();
+        String pid = getPid(device);
+        if (!empty(pid)) {
+            String command = String.format("kill -9 %s", pid);
+            logger.info("kill: {}", command);
+            executeShellCommand(device, command);
         }
     }
+
+    private String getPid(IDevice device) {
+        String s = executeShellCommand(device, "ps -ef|grep minicap");
+        if (empty(s)) return null;
+        String[] split = s.split("\n");
+        for (String ss : split) {
+            if (ss.contains("minicap -P")) {
+                String[] split1 = ss.split("\\s+");
+                if (split1.length > 1) {
+                    return split1[1];
+                }
+            }
+        }
+        return null;
+    }
+
+    public String executeShellCommand(IDevice device, String command) {
+        if (empty(command)) return null;
+        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
+        try {
+            device.executeShellCommand(command, receiver);
+            return receiver.getOutput();
+        } catch (TimeoutException | AdbCommandRejectedException | ShellCommandUnresponsiveException | IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+
 
     private void init() {
         AndroidDebugBridge.init(false);
@@ -235,7 +252,7 @@ public class MiniServerTest {
         };
     }
 
-    @Test
+//    @Test
     public void testBuffer() {
         ByteBuffer buffer = ByteBuffer.allocate(4);
         buffer.putInt(1080);
@@ -251,6 +268,7 @@ public class MiniServerTest {
 
     private static final String MINICAP_BIN = "/data/local/tmp/minicap";
     private static final String MINICAP_SO = "/data/local/tmp/minicap.so";
+    private static final String ADB_HOME = "/home/force/Android/Sdk/platform-tools/adb";
 
     @Test
     public void testVersion() {
@@ -268,46 +286,99 @@ public class MiniServerTest {
             return;
         }
         executeServer(device);
+        String pid = getPid(device);
+        logger.info("pid: {}", pid);
     }
 
-    private boolean pushServer(IDevice device) {
-        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
+    public boolean pushServer(IDevice device) {
+        String userDir = System.getProperty("user.dir");
+
+        String bin_format = "minicap/%s/minicap";
+        String soFormat = "minicap/libs/android-%d/%s/minicap.so";
+
         AndroidVersion version = device.getVersion();
-        logger.info("level: {}", version.getApiLevel());
         String abi = device.getProperty("ro.product.cpu.abi");
-        logger.info("abi: {}", abi);
-        String localMini = String.format("/home/force/Projects/minicap/libs/%s/minicap", abi);
-        String localSo = String.format("/home/force/Projects/minicap/jni/minicap-shared/aosp/libs/android-%d/%s/minicap.so", version.getApiLevel(), abi);
+
+        String binResource = String.format(bin_format, abi);
+        logger.info(binResource);
+        String soResource = String.format(soFormat, version.getApiLevel(), abi);
+        logger.info(soResource);
+
+        String localBin = userDir + File.separator + "tmp" + File.separator + binResource;
+        String localSo = userDir + File.separator + "tmp" + File.separator + soResource;
+
+        if (!resourceToFile(binResource, localBin)) {
+            logger.error("bin resource to file failed");
+            return false;
+        }
+        if (!resourceToFile(soResource, localSo)) {
+            logger.error("so resource to file failed");
+            return false;
+        }
+
         try {
-            device.pushFile(localMini, "/data/local/tmp/minicap");
+            device.pushFile(localBin, "/data/local/tmp/minicap");
             device.pushFile(localSo, "/data/local/tmp/minicap.so");
-            device.executeShellCommand("chmod 777 " + MINICAP_BIN, receiver);
+            executeShellCommand(device, "chmod +x /data/local/tmp/minicap");
             return true;
-        } catch (IOException | AdbCommandRejectedException | TimeoutException | SyncException | ShellCommandUnresponsiveException e) {
+        } catch (IOException | AdbCommandRejectedException | TimeoutException | SyncException e) {
             e.printStackTrace();
         }
         return false;
+    }
+
+    public boolean resourceToFile(String resourcePath, String filePath) {
+        File file = new File(filePath);
+        if (file.exists() && file.isFile()) {
+            logger.info("file exists: {}", filePath);
+            return true;
+        }
+        ClassPathResource resource = new ClassPathResource(resourcePath);
+        File parent = file.getParentFile();
+        logger.info(parent.getAbsolutePath());
+        if (!parent.mkdirs()) {
+            logger.error("make dirs failed");
+            return false;
+        }
+        boolean result = false;
+        FileOutputStream outputStream = null;
+        InputStream inputStream = null;
+        byte[] bytes = new byte[1024 * 512];
+        int len;
+        try {
+            inputStream = resource.getInputStream();
+            outputStream = new FileOutputStream(file);
+            while ((len = inputStream.read(bytes)) != -1) {
+                outputStream.write(bytes, 0, len);
+            }
+            result = true;
+        } catch (IOException e) {
+            logger.error(e.getMessage(), e);
+        } finally {
+            try {
+                if (outputStream != null) outputStream.close();
+                if (inputStream != null) inputStream.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        return result;
     }
 
     private boolean executeServer(IDevice device) {
-        CollectingOutputReceiver receiver = new CollectingOutputReceiver();
         // start minicap
-        String start = "LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x1920@1080x1920/0 -S >/dev/null 2>&1 &";
-        String check = "ps -ef|grep minicap";
-        logger.info("start minicap: {}", start);
+        String start = String.format("%s -s %s shell LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x1920@1080x1920/0 -S >/dev/null 2>&1 &",
+                ADB_HOME, device.getSerialNumber());
+        executeAdbCommand(start);
+        return true;
+    }
+
+    private void executeAdbCommand(String command) {
+        logger.info(command);
         try {
-            device.executeShellCommand(start, receiver);
-            for (int i = 0; i < 10; i++) {
-                device.executeShellCommand(check, receiver);
-                if (receiver.getOutput() != null && receiver.getOutput().contains("minicap")) {
-                    return true;
-                }
-                Thread.sleep(1000);
-            }
-        } catch (IOException | TimeoutException | AdbCommandRejectedException |
-                ShellCommandUnresponsiveException | InterruptedException e) {
+            Runtime.getRuntime().exec(command);
+        } catch (IOException e) {
             e.printStackTrace();
         }
-        return false;
     }
 }
