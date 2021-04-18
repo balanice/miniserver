@@ -22,6 +22,7 @@ public class MiniWebSocket {
     @OnMessage
     public void onMessage(Session session, String message) {
         logger.info("message: {}", message);
+        SpringContextUtil.getBean(DeviceService.class).handleAction(message);
     }
 
     @OnClose

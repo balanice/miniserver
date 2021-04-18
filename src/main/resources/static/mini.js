@@ -23,3 +23,16 @@ function disconnect() {
     document.getElementById("img_show").src = null;
     console.debug("disconnect");
 }
+
+function clickImage(event) {
+    if (ws == null) {
+        console.log("ws is null");
+        return;
+    }
+    var img = document.getElementById("img_show");
+    var realX = parseInt(event.offsetX / img.width * img.naturalWidth);
+    var realY = parseInt(event.offsetY / img.height * img.naturalHeight);
+    console.log("realX: %d, realY: %d", realX, realY);
+    message = { "action": "swipe", "fromX": realX, "fromY": realY, "toX": realX, "toY": realY };
+    ws.send(JSON.stringify(message));
+}

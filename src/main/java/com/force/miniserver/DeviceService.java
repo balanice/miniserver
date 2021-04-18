@@ -2,6 +2,9 @@ package com.force.miniserver;
 
 import com.android.ddmlib.*;
 import com.android.sdklib.AndroidVersion;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
@@ -284,5 +287,24 @@ public class DeviceService {
             logger.info("run end");
         }
 
+    }
+
+    public void handleAction(String message) {
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            JsonNode jsonNode = mapper.readTree(message);
+            String action = jsonNode.get("action").asText(null);
+            if ("swipe".equals(action)) {
+                double fromX = jsonNode.get("fromX").asInt();
+                double fromY = jsonNode.get("fromY").asInt();
+                double toX = jsonNode.get("toX").asInt();
+                double toY = jsonNode.get("toY").asInt();
+                String command = String.format("input swipe %f %f %f %f", fromX, fromY, toX, toY);
+                logger.info("command: {}", command);
+                executeShellCommand(device, command);
+            }
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
+        }
     }
 }
